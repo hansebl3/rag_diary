@@ -375,15 +375,19 @@ if st.session_state.step >= 3:
                     model = get_embedding_model()
                     embeddings = model.encode(chunks).tolist()
                     
-                    # Prepare IDs (UUID + chunk index)
-                    ids = [f"{record_uuid}_{i}" for i in range(len(chunks))]
+                    # Prepare IDs (Unique Vector IDs, separate from Record UUID)
+                    # STRATEGY: Decouple Vector DB Store from Business Logic
+                    # 1. Vector DB IDs are purely technical, random UUIDs (uuid4).
+                    # 2. Business Logic ID (Record UUID) is stored in 'metadata' as 'source_id'.
+                    # This prevents ID collision issues and allows multiple chunks to reference the same source cleanly.
+                    ids = [str(uuid.uuid4()) for _ in chunks]
                     
                     # Prepare Metadatas
                     basic_metadata = {
                         "date": str(data['date']),
                         "category": data['category'],
                         "author": "User",
-                        "source_id": record_uuid,    # UUID
+                        "source_id": record_uuid,    # <--- The Real Link to MariaDB
                         "table_name": table_name,
                         **data['metadata'] # Flattened for Chroma query capability
                     }
@@ -406,21 +410,28 @@ if st.session_state.step >= 3:
             
             # Result
             if db_success and chroma_success:
-                st.success(f"🎉 Successfully saved to BOTH MariaDB (UUID: {record_uuid}) and ChromaDB!")
-                if st.button("Start New Entry"):
-                    # Clear session state but PRESERVE user settings
-                    # We explicitly remove data-related keys to force widget reset
-                    keys_to_clear = ["processed_data", "analysis_result", "final_data", "original_content"]
-                    for key in keys_to_clear:
-                        if key in st.session_state:
-                            del st.session_state[key]
-                    
-                    # Reset Step
-                    st.session_state.step = 1
-                    st.rerun()
+                st.session_state.last_saved_uuid = record_uuid
+                st.session_state.step = 4
+                st.rerun()
             elif inserted_id:
                 st.warning(f"Saved to MariaDB (ID: {inserted_id}) but FAILED ChromaDB.")
             elif chroma_success:
-                st.warning("Saved to ChromaDB but FAILED MariaDB (Critical Data Sync Issue).") # Should not happen with if logic
+                st.warning("Saved to ChromaDB but FAILED MariaDB (Critical Data Sync Issue).") 
             else:
                 st.error("Failed to save to both databases.")
+
+# Step 4: Success & Reset
+if st.session_state.step == 4:
+    st.divider()
+    st.success(f"🎉 Successfully saved to BOTH MariaDB (UUID: {st.session_state.get('last_saved_uuid')}) and ChromaDB!")
+    
+    if st.button("Start New Entry", type="primary"):
+        # Clear session state but PRESERVE user settings
+        keys_to_clear = ["processed_data", "analysis_result", "final_data", "original_content", "last_saved_uuid"]
+        for key in keys_to_clear:
+            if key in st.session_state:
+                del st.session_state[key]
+        
+        # Reset Step
+        st.session_state.step = 1
+        st.rerun()
