@@ -18,4 +18,4 @@ ENV OLLAMA_BASE_URL="http://100.65.53.9:11434"
 ENV DB_HOST="127.0.0.1"
 
 # Command to run the app
-CMD ["streamlit", "run", "app.py", "--server.port", "8510", "--server.address", "0.0.0.0"]
+CMD ["streamlit", "run", "src/app.py", "--server.port", "8510", "--server.address", "0.0.0.0"]
