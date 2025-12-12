@@ -1,0 +1,19 @@
+version: '3.8'
+
+services:
+  rag-diary:
+    build: .
+    container_name: rag-diary-app
+    network_mode: "host" # Use host network to access localhost DB and Ollama easily
+    environment:
+      - DB_HOST=127.0.0.1
+      - DB_USER=root
+      - DB_PASSWORD=lavita!978
+      - DB_NAME=rag_diary_db
+      - OLLAMA_BASE_URL=http://100.65.53.9:11434
+      - CHROMA_HOST=100.65.53.9
+      - CHROMA_PORT=8001
+      - TZ=Asia/Seoul
+    volumes:
+      - .:/app
+    restart: unless-stopped
