@@ -8,3 +8,4 @@ venv/
 vector_dbs/
 data/
 last_settings.json
+src/llm_config.json

@@ -60,6 +60,7 @@ db_utils.init_db()
 
 # --- Functions ---
 
+# --- Helper Functions (Cloud Support) ---
 def get_ollama_models(base_url):
     """Fetches available models from Ollama."""
     try:
@@ -71,47 +72,105 @@ def get_ollama_models(base_url):
             data = response.json()
             return [model['name'] for model in data.get('models', [])]
     except Exception as e:
-        st.error(f"Failed to fetch models: {e}")
+        # st.error(f"Failed to fetch models: {e}")
+        pass
     return ["llama3:latest", "mistral:latest"] # Fallback
 
-def analyze_log_content(text, model_name, config):
-    """Analyzes text to extract structured fields using Ollama (Native Requests)."""
+def call_openai_api(model, messages, api_key):
+    url = "https://api.openai.com/v1/chat/completions"
+    headers = {
+        "Authorization": f"Bearer {api_key}",
+        "Content-Type": "application/json"
+    }
+    # Force JSON format for analysis if possible (gpt-4o supports response_format)
+    payload = {
+        "model": model,
+        "messages": messages,
+        "stream": False
+    }
+    # Try adding json format if model supports it (gpt-4o, turbo)
+    if "gpt-4" in model or "gpt-3.5-turbo" in model:
+         payload["response_format"] = {"type": "json_object"}
+
+    try:
+        r = requests.post(url, headers=headers, json=payload, timeout=60)
+        r.raise_for_status()
+        return r.json()['choices'][0]['message']['content']
+    except Exception as e:
+        return f"Error: {e}"
+
+def call_gemini_api(model, messages, api_key):
+    # Gemini Logic (Non-streaming)
+    contents = []
+    for m in messages:
+        role = "user" if m["role"] == "user" else "model"
+        contents.append({"role": role, "parts": [{"text": m["content"]}]})
+
+    url = f"https://generativelanguage.googleapis.com/v1beta/models/{model}:generateContent?key={api_key}"
+    headers = {"Content-Type": "application/json"}
+    # Gemini JSON mode needs configuration or prompt engineering.
+    # We will rely on Prompt Engineering + 'generationConfig'
+    payload = {
+        "contents": contents,
+        "generationConfig": {"response_mime_type": "application/json"}
+    }
+        
+    try:
+        r = requests.post(url, headers=headers, json=payload, timeout=60)
+        r.raise_for_status()
+        return r.json()['candidates'][0]['content']['parts'][0]['text']
+    except Exception as e:
+        return f"Error: {e}"
+
+def analyze_log_content(text, model_name, config, provider, api_key=None):
+    """Analyzes text to extract structured fields using Selected Provider."""
     try:
         # Prompt Construction
         prompt_tmpl = config["prompt_template"]
         full_prompt = prompt_tmpl.format(text=text) # Assuming template uses {text}
+        
+        # Ensure JSON instruction is clear for all models
+        if "JSON" not in full_prompt:
+             full_prompt += "\n\nRespond strictly in valid JSON format."
 
-        payload = {
-            "model": model_name,
-            "messages": [{"role": "user", "content": full_prompt}],
-            "stream": False,
-            "format": "json" # Request JSON output mode if supported
-        }
+        content = ""
         
-        url = f"{OLLAMA_BASE_URL.rstrip('/')}/api/chat"
-        response = requests.post(url, json=payload, timeout=60)
-        
-        if response.status_code == 200:
-            result = response.json()
-            content = result.get('message', {}).get('content', '')
+        if provider == "Ollama":
+            payload = {
+                "model": model_name,
+                "messages": [{"role": "user", "content": full_prompt}],
+                "stream": False,
+                "format": "json" # Request JSON output mode if supported
+            }
+            url = f"{OLLAMA_BASE_URL.rstrip('/')}/api/chat"
+            response = requests.post(url, json=payload, timeout=60)
+            if response.status_code == 200:
+                result = response.json()
+                content = result.get('message', {}).get('content', '')
+            else:
+                 st.error(f"Ollama API Error: {response.text}")
+                 return config["default_values"]
+                 
+        elif provider == "OpenAI":
+            content = call_openai_api(model_name, [{"role": "user", "content": full_prompt}], api_key)
             
-            # Parsing logic logic
-            try:
-                data = json.loads(content)
-                return data
-            except json.JSONDecodeError:
-                # Fallback extraction if markdown code blocks exist
-                if "```json" in content:
-                    content = content.split("```json")[1].split("```")[0]
-                    return json.loads(content)
-                elif "```" in content:
-                    content = content.split("```")[1].split("```")[0]
-                    return json.loads(content)
-                else:
-                    return config["default_values"] # Simple Failover
-        else:
-             st.error(f"Ollama API Error: {response.text}")
-             return config["default_values"]
+        elif provider == "Gemini":
+            content = call_gemini_api(model_name, [{"role": "user", "content": full_prompt}], api_key)
+
+        # Parsing logic logic
+        try:
+            # Cleanup potential markdown code blocks
+            clean_content = content
+            if "```json" in clean_content:
+                clean_content = clean_content.split("```json")[1].split("```")[0]
+            elif "```" in clean_content:
+                clean_content = clean_content.split("```")[1].split("```")[0]
+            
+            data = json.loads(clean_content)
+            return data
+        except json.JSONDecodeError:
+            st.warning(f"JSON Parse Failed. Raw extraction:\n{content}")
+            return config["default_values"] # Simple Failover
         
     except Exception as e:
         st.error(f"LLM Analysis Error: {e}")
@@ -152,11 +211,11 @@ def load_settings():
             pass
     return {}
 
-def save_settings(model, category):
+def save_settings(provider, model, category):
     """Saves current settings to JSON file."""
     try:
         with open(SETTINGS_FILE, "w") as f:
-            json.dump({"selected_model": model, "selected_category": category}, f)
+            json.dump({"selected_provider": provider, "selected_model": model, "selected_category": category}, f)
     except Exception as e:
         print(f"Failed to save settings: {e}")
 
@@ -171,9 +230,29 @@ st.sidebar.title("🗂️ Settings")
 # Load Settings Once
 settings = load_settings()
 
+# Load Config
+SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
+CONFIG_FILE = os.path.join(SCRIPT_DIR, "llm_config.json")
+llm_config = {"api_keys": {}, "models": {}}
+if os.path.exists(CONFIG_FILE):
+     with open(CONFIG_FILE, 'r') as f:
+         try: llm_config = json.load(f)
+         except: pass
+
 # 2. Model Selection
 st.sidebar.subheader("🤖 LLM Model")
-available_models = get_ollama_models(OLLAMA_BASE_URL)
+
+# Provider Selection
+providers = ["Ollama", "OpenAI", "Gemini"]
+selected_provider = st.sidebar.selectbox("Provider", providers, index=providers.index(settings.get("selected_provider", "Ollama")) if settings.get("selected_provider") in providers else 0)
+
+available_models = []
+if selected_provider == "Ollama":
+    available_models = get_ollama_models(OLLAMA_BASE_URL)
+elif selected_provider == "OpenAI":
+    available_models = llm_config.get("models", {}).get("openai", ["gpt-4o"])
+elif selected_provider == "Gemini":
+    available_models = llm_config.get("models", {}).get("gemini", ["gemini-1.5-flash"])
 
 # Initialize Session State from File if not present
 if "selected_model" not in st.session_state:
@@ -190,6 +269,14 @@ selected_model = st.sidebar.selectbox(
     index=default_index,
     key="selected_model"
 )
+
+# API Key Check
+api_key = ""
+if selected_provider != "Ollama":
+    key_name = selected_provider.lower()
+    api_key = llm_config.get("api_keys", {}).get(key_name, "")
+    if not api_key:
+        api_key = st.sidebar.text_input(f"{selected_provider} API Key", type="password")
 
 # 1. Category Selection (Moved to Main Area logic, but we handle init here)
 category_keys = list(category_config.CATEGORY_CONFIG.keys())
@@ -211,8 +298,8 @@ category = st.selectbox(
 )
 
 # Auto-Save Settings whenever selections change
-if selected_model != settings.get("selected_model") or category != settings.get("selected_category"):
-    save_settings(selected_model, category)
+if selected_model != settings.get("selected_model") or category != settings.get("selected_category") or selected_provider != settings.get("selected_provider"):
+    save_settings(selected_provider, selected_model, category)
 
 # Load Config for selected category
 current_config = category_config.get_config(category)
@@ -239,7 +326,7 @@ if st.button("✨ Run AI Analysis"):
     else:
         with st.spinner(f"AI ({selected_model}) is analyzing your text..."):
             # Pass config to analysis function
-            analysis_result = analyze_log_content(content, selected_model, current_config)
+            analysis_result = analyze_log_content(content, selected_model, current_config, selected_provider, api_key)
             st.session_state.analysis_result = analysis_result
             st.session_state.step = 2
 

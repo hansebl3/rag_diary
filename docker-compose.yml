@@ -11,7 +11,7 @@ services:
       - DB_PASSWORD=lavita!978
       - DB_NAME=rag_diary_db
       - OLLAMA_BASE_URL=http://100.65.53.9:11434
-      - CHROMA_HOST=100.65.53.9
+      - CHROMA_HOST=127.0.0.1
       - CHROMA_PORT=8001
       - TZ=Asia/Seoul
     volumes:
