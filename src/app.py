@@ -122,7 +122,7 @@ def call_gemini_api(model, messages, api_key):
     except Exception as e:
         return f"Error: {e}"
 
-def analyze_log_content(text, model_name, config, provider, api_key=None):
+def analyze_log_content(text, model_name, config, provider, api_key=None, custom_map=None):
     """Analyzes text to extract structured fields using Selected Provider."""
     try:
         # Prompt Construction
@@ -135,7 +135,49 @@ def analyze_log_content(text, model_name, config, provider, api_key=None):
 
         content = ""
         
-        if provider == "Ollama":
+        # Check Custom Providers first
+        if custom_map and provider in custom_map:
+             p_conf = custom_map[provider]
+             p_type = p_conf.get('type', 'ollama')
+             p_url = p_conf['url']
+             
+             if p_type == 'ollama':
+                payload = {
+                    "model": model_name,
+                    "messages": [{"role": "user", "content": full_prompt}],
+                    "stream": False,
+                    "format": "json"
+                }
+                # Ensure URL ends with /api/chat
+                target = f"{p_url.rstrip('/')}/api/chat" if not p_url.endswith("/api/chat") else p_url
+                response = requests.post(target, json=payload, timeout=60)
+                if response.status_code == 200:
+                    result = response.json()
+                    content = result.get('message', {}).get('content', '')
+                else:
+                     st.error(f"Ollama API Error: {response.text}")
+                     return config["default_values"]
+                     
+             elif p_type == 'openai':
+                # Re-use OpenAI logic but with local URL
+                # Construct local URL
+                target_url = f"{p_url.rstrip('/')}/chat/completions"
+                headers = {"Authorization": "Bearer local", "Content-Type": "application/json"}
+                payload = {
+                    "model": model_name, 
+                    "messages": [{"role": "user", "content": full_prompt}], 
+                    "stream": False,
+                    # "response_format": {"type": "json_object"} # Some local models might support this
+                }
+                try:
+                    r = requests.post(target_url, headers=headers, json=payload, timeout=60)
+                    r.raise_for_status()
+                    content = r.json()['choices'][0]['message']['content']
+                except Exception as e:
+                     st.error(f"Local OpenAI Error: {e}")
+                     return config["default_values"]
+
+        elif provider == "Ollama":
             payload = {
                 "model": model_name,
                 "messages": [{"role": "user", "content": full_prompt}],
@@ -242,13 +284,54 @@ if os.path.exists(CONFIG_FILE):
 # 2. Model Selection
 st.sidebar.subheader("🤖 LLM Model")
 
+# Load Custom Providers
+custom_providers_list = llm_config.get("custom_providers", [])
+custom_provider_names = [p['display_name'] for p in custom_providers_list]
+custom_provider_map = {p['display_name']: p for p in custom_providers_list}
+
 # Provider Selection
-providers = ["Ollama", "OpenAI", "Gemini"]
-selected_provider = st.sidebar.selectbox("Provider", providers, index=providers.index(settings.get("selected_provider", "Ollama")) if settings.get("selected_provider") in providers else 0)
+cloud_providers = ["OpenAI", "Gemini"]
+providers = custom_provider_names + cloud_providers
+
+# Handling legacy "Ollama" string in settings if it exists but mapped to "Ollama (2080ti)"
+default_provider_idx = 0
+saved_provider = settings.get("selected_provider")
+
+# Migration catch: if saved is "Ollama" but not in list, try to find "Ollama (2080ti)"
+if saved_provider == "Ollama" and "Ollama (2080ti)" in providers:
+    saved_provider = "Ollama (2080ti)"
+
+if saved_provider in providers:
+    default_provider_idx = providers.index(saved_provider)
+
+selected_provider = st.sidebar.selectbox("Provider", providers, index=default_provider_idx)
 
 available_models = []
-if selected_provider == "Ollama":
-    available_models = get_ollama_models(OLLAMA_BASE_URL)
+
+if selected_provider in custom_provider_map:
+    p_conf = custom_provider_map[selected_provider]
+    p_type = p_conf.get('type', 'ollama')
+    p_url = p_conf['url']
+    
+    if p_type == 'ollama':
+         # Fetch Ollama models
+         # p_url usually base. get_ollama_models expects base.
+         # Logic inside get_ollama_models handles appending /api/tags
+         available_models = get_ollama_models(p_url)
+    elif p_type == 'openai':
+         # Fetch OpenAI-like models
+         try:
+             url = f"{p_url.rstrip('/')}/models"
+             resp = requests.get(url, timeout=5)
+             if resp.status_code == 200:
+                data = resp.json()
+                if 'data' in data:
+                    available_models = [m['id'] for m in data['data']]
+                else:
+                    available_models = [str(m) for m in data]
+         except: pass
+         if not available_models: available_models = ["default-model"]
+
 elif selected_provider == "OpenAI":
     available_models = llm_config.get("models", {}).get("openai", ["gpt-4o"])
 elif selected_provider == "Gemini":
@@ -272,7 +355,9 @@ selected_model = st.sidebar.selectbox(
 
 # API Key Check
 api_key = ""
-if selected_provider != "Ollama":
+# API Key Check
+api_key = ""
+if selected_provider not in custom_provider_map:
     key_name = selected_provider.lower()
     api_key = llm_config.get("api_keys", {}).get(key_name, "")
     if not api_key:
@@ -326,7 +411,7 @@ if st.button("✨ Run AI Analysis"):
     else:
         with st.spinner(f"AI ({selected_model}) is analyzing your text..."):
             # Pass config to analysis function
-            analysis_result = analyze_log_content(content, selected_model, current_config, selected_provider, api_key)
+            analysis_result = analyze_log_content(content, selected_model, current_config, selected_provider, api_key, custom_provider_map)
             st.session_state.analysis_result = analysis_result
             st.session_state.step = 2
 
