@@ -298,8 +298,8 @@ default_provider_idx = 0
 saved_provider = settings.get("selected_provider")
 
 # Migration catch: if saved is "Ollama" but not in list, try to find "Ollama (2080ti)"
-if saved_provider == "Ollama" and "Ollama (2080ti)" in providers:
-    saved_provider = "Ollama (2080ti)"
+if saved_provider == "Ollama" and "Llama.cpp (2080linux)" in providers:
+    saved_provider = "Llama.cpp (2080linux)"
 
 if saved_provider in providers:
     default_provider_idx = providers.index(saved_provider)
